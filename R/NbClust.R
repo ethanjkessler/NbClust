@@ -1,6 +1,8 @@
 NbClust <-function(data = NULL, diss=NULL, distance ="euclidean", min.nc=2, max.nc=15, method =NULL, index = "all", alphaBeale = 0.1)
 {
-    
+    library(Rcpp)
+    library(future)
+  plan(multiprocess)
     x<-0
     min_nc <- min.nc
     max_nc <- max.nc
@@ -326,6 +328,28 @@ density.clusters<-function(cl, x)
  
 }
 
+cppFunction('void cdensitybw(NumericVector cl, NumericMatrix x, NumericMatrix centers, NumericMatrix densitybw, int k, int n, double stdev) {
+  for (int u = 0; u < k; u++) {
+    for (int v = 0; v < k; v++) {
+      if (v != u) {
+        NumericVector distance = NumericVector(n);
+        NumericVector moy = (centers.row(u) + centers.row(v)) / 2;
+        for (int i = 0; i < n; i++) {
+          if (cl[i] == u || cl[i] == v) {
+            for (int j = 0; j < x.ncol(); j++) {
+              distance[i] = distance[i] + pow((x(i, j) - moy[j]), 2);
+            }
+            distance[i] = sqrt(distance[i]);
+            if (distance[i] <= stdev) {
+              densitybw(u, v) = densitybw(u, v) + 1;
+            }
+          }
+        }
+      }
+    }
+  }
+}')
+
 
 density.bw<-function(cl, x)
 {
@@ -337,32 +361,33 @@ density.bw<-function(cl, x)
    density.bw<- matrix(0, ncol = k, nrow = k)
    u<-1
    
-   for(u in 1:k)
-   {
-     for(v in 1:k)
-     {
-       if(v!=u)
-       {  
-          distance<- matrix(0, ncol = 1, nrow = n)
-          moy<-(centers.matrix[u,]+centers.matrix[v,])/2
-          for(i in 1:n)
-          {
-            if((cl[i]==u)||(cl[i]==v))
-            {
-              for (j in 1:ncol(x))   
-              {               
-                 distance[i]<- distance[i]+(x[i,j]-moy[j])^2 
-              }   
-              distance[i]<- sqrt(distance[i])
-              if(distance[i]<= stdev)
-              {
-                density.bw[u,v]<-density.bw[u,v]+1                  
-              }  
-            }           
-          }
-        }       
-       }
-      }
+  #  for(u in 1:k)
+  #  {
+  #    for(v in 1:k)
+  #    {
+  #      if(v!=u)
+  #      {  
+  #         distance<- matrix(0, ncol = 1, nrow = n)
+  #         moy<-(centers.matrix[u,]+centers.matrix[v,])/2
+  #         for(i in 1:n)
+  #         {
+  #           if((cl[i]==u)||(cl[i]==v))
+  #           {
+  #             for (j in 1:ncol(x))   
+  #             {               
+  #                distance[i]<- distance[i]+(x[i,j]-moy[j])^2 
+  #             }   
+  #             distance[i]<- sqrt(distance[i])
+  #             if(distance[i]<= stdev)
+  #             {
+  #               density.bw[u,v]<-density.bw[u,v]+1                  
+  #             }  
+  #           }           
+  #         }
+  #       }       
+  #      }
+  #     }
+  cdensitybw(cl, x, centers.matrix, density.bw, k, n, stdev);
      density.clust<-density.clusters(cl,x)$density 
      S<-0
      for(u in 1:k)
@@ -426,14 +451,24 @@ Index.Hubert<-function(x, cl)
       varP<-sqrt(variance.matrix %*% variance.matrix)
       
       centers.clusters<-centers(cl,x)
-      for(i in 1:n)
-      {
-        for(u in 1:k)
-        {
-          if(cl[i]==u)
-            y[i,]<-centers.clusters[u,]
-        }   
-      }  
+      cppFunction('void hubert1(int n, int k, NumericVector cl, NumericMatrix y, NumericMatrix clusters) {
+        for (int i = 0; i < n; i++) {
+          for (int j = 0; j < k; j++) {
+            if (cl[i] == j) {
+              y.row(i) = clusters.row(j);
+            }
+          }
+        }
+      }')
+      # for(i in 1:n)
+      # {
+      #   for(u in 1:k)
+      #   {
+      #     if(cl[i]==u)
+      #       y[i,]<-centers.clusters[u,]
+      #   }   
+      # }
+      hubert1(n, k, cl, y, centers.clusters)
       
       Q<- as.matrix(dist(y, method="euclidean"))
       meanQ<-mean(Q)
@@ -444,17 +479,27 @@ Index.Hubert<-function(x, cl)
       M<-n*(n-1)/2
       S<-0
       n1<-n-1
-      
-      for(i in 1:n1)
-      { 
-        j<-i+1
-        while(j<=n)
-        {
-          S<-S+(P[i,j]-meanP)*(Q[i,j]-meanQ)
-          j<-j+1
+      cppFunction('void hubert2(int n, int n1, NumericMatrix P, NumericMatrix Q, double meanP, double meanQ) {
+        double S = 0;
+        for (int i = 0; i < n1; i++) {
+          int j = i + 1;
+          while (j <= n) {
+            S = S + (P(i,j) - meanP) * (Q(i, j) - meanQ);
+            j++;
+          }
         }
+      }')
+      # for(i in 1:n1)
+      # { 
+      #   j<-i+1
+      #   while(j<=n)
+      #   {
+      #     S<-S+(P[i,j]-meanP)*(Q[i,j]-meanQ)
+      #     j<-j+1
+      #   }
         
-      } 
+      # }
+      hubert2(n, n1, P, Q, meanP, meanQ)
       gamma<-S/(M*varP*varQ)
       
       return(gamma)
@@ -544,13 +589,9 @@ Index.15and28  <- function (cl1,cl2,md)
         cluster.size[u] <- sum(cl1 == u)
         du <- as.dist(dmat[cl1 == u, cl1 == u])
         within.dist1 <- c(within.dist1, du)
-        #average.distance[u] <- mean(du)
-        #median.distance[u] <- median(du)
-        #bv <- numeric(0)
         for (v in 1:cn1) {
             if (v != u) {
                 suv <- dmat[cl1 == u, cl1 == v]
-                #bv <- c(bv, suv)
                 if (u < v) {
                   separation.matrix[u, v] <- separation.matrix[v,u] <- min(suv)
                   between.dist1 <- c(between.dist1, suv)
@@ -568,8 +609,6 @@ Index.15and28  <- function (cl1,cl2,md)
         cluster.size[w] <- sum(cl2 == w)
         dw <- as.dist(dmat[cl2 == w, cl2 == w])
         within.dist2 <- c(within.dist2, dw)
-        #average.distance[w] <- mean(dw)
-        #median.distance[w] <- median(dw)
         bx <- numeric(0)
         for (x in 1:cn2) {
             if (x != w) {
@@ -607,53 +646,57 @@ Index.15and28  <- function (cl1,cl2,md)
 Indice.ptbiserial <- function (x,md,cl1)
 {
 	nn <- dim(x)[1]
-	pp <- dim(x)[2]
-
+  #print(nn)
 	md2 <- as.matrix(md)
 	m01 <- array(NA, c(nn,nn))
 	nbr <- (nn*(nn-1))/2
 	pb <- array(0,c(nbr,2))
-	
-	m3 <- 1
-	for (m1 in 2:nn)
-	{
-	     m12 <- m1-1
-	   for (m2 in 1:m12)
-	   {
-		if (cl1[m1]==cl1[m2]) m01[m1,m2]<-0
-		if (cl1[m1]!=cl1[m2]) m01[m1,m2]<-1
-		pb[m3,1] <- m01[m1,m2]
-		pb[m3,2] <- md2[m1,m2]
-		m3 <- m3+1
-	   }
-	}
+
+  cppFunction('void fillPb(int nn, NumericVector cl1, NumericMatrix pb, NumericMatrix md2) {
+    int m3 = 0;
+    for (int m1 = 1; m1 < nn; m1++) {
+      for (int m2 = 0; m2 < m1 - 1; m2++) {
+        if (cl1[m1]==cl1[m2]) {
+          pb(m3, 0) = 0;
+        }
+        else {
+          pb(m3, 0) = 1;
+        }
+        pb(m3, 1) = md2(m1, m2);
+        m3++;
+      }
+    }
+  }')
+
+	# m3 <- 1
+
+	# for (m1 in 2:nn)
+	# {
+	#    for (m2 in 1:(m1-1))
+	#    {
+	# 	if (cl1[m1]==cl1[m2]) {
+  #            pb[m3,1]<-0
+  #       }
+	# 	else {
+  #           pb[m3,1]<-1
+  #       }
+	# 	pb[m3,2] <- md2[m1,m2]
+	# 	m3 <- m3+1
+	#    }
+	# }
+  fillPb(nn, cl1, pb, md2)
 
 	y <- pb[,1]
 	x <- pb[,2] 
+    level = 2
+    y <- as.factor(y)
+    levs <- levels(y)
+    ind <- y == levs[level]
+    diff.mu <- mean(x[ind]) - mean(x[!ind])
+    prob <- mean(ind)
+    diff.mu * sqrt(prob * (1 - prob))/sd(x)
 
-	biserial.cor <- function (x, y, use = c("all.obs", "complete.obs"), level = 1) 
-	{
-	    if (!is.numeric(x)) 
-	        stop("'x' must be a numeric variable.\n")
-	    y <- as.factor(y)
-	    if (length(levs <- levels(y)) > 2) 
-	        stop("'y' must be a dichotomous variable.\n")
-	    if (length(x) != length(y)) 
-	        stop("'x' and 'y' do not have the same length")
-	    use <- match.arg(use)
-	    if (use == "complete.obs") {
-	        cc.ind <- complete.cases(x, y)
-	        x <- x[cc.ind]
-	        y <- y[cc.ind]
-	    }
-	    ind <- y == levs[level]
-	    diff.mu <- mean(x[ind]) - mean(x[!ind])
-	    prob <- mean(ind)
-	    diff.mu * sqrt(prob * (1 - prob))/sd(x)
-	}
-
-    ptbiserial <- biserial.cor(x=pb[,2], y=pb[,1], level = 2)
-    return(ptbiserial)
+    return(diff.mu)
 }
 
     
@@ -736,7 +779,6 @@ Indices.WKWL <- function (x,cl1=cl1,cl2=cl2)
 #                                                                      #
 ########################################################################    
     
-   
 
 Indices.WBT <- function(x,cl,P,s,vv) 
 {
@@ -750,8 +792,7 @@ Indices.WBT <- function(x,cl,P,s,vv)
     for (j in 1:qq)
     {
 	    z[i,j]==0
-	    if (clX[i,1]==j) 
-	    {z[i,j]=1}
+	    if (clX[i,1]==j) {z[i,j]=1}
     }
 
   xbar <- solve(t(z)%*%z)%*%t(z)%*%x
@@ -777,14 +818,16 @@ Indices.WBT <- function(x,cl,P,s,vv)
   if (all(p1>0,p1<pp))
   {
     for (i in 1:p1)
-    v1 <- v1*s[i]
-    c <- (v1/(qq))^(1/p1)
-    u <- s/c
-    b1 <- sum(1/(n+u[1:p1]))
-    b2 <- sum(u[p1+1:pp]^2/(n+u[p1+1:pp]),na.rm=TRUE)
-    E_R2 <- 1-((b1+b2)/sum(u^2))*((n-qq)^2/n)*(1+4/n)
-    ccc <- log((1-E_R2)/(1-R2))*(sqrt(n*p1/2)/((0.001+E_R2)^1.2))
-  }else 
+    {
+      v1 <- v1*s[i]
+      c <- (v1/(qq))^(1/p1)
+      u <- s/c
+      b1 <- sum(1/(n+u[1:p1]))
+      b2 <- sum(u[p1+1:pp]^2/(n+u[p1+1:pp]),na.rm=TRUE)
+      E_R2 <- 1-((b1+b2)/sum(u^2))*((n-qq)^2/n)*(1+4/n)
+      ccc <- log((1-E_R2)/(1-R2))*(sqrt(n*p1/2)/((0.001+E_R2)^1.2))
+    }
+  } else 
   {
     b1 <- sum(1/(n+u))
     E_R2 <- 1-(b1/sum(u^2))*((n-qq)^2/n)*(1+4/n)
